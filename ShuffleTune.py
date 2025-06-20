@@ -1,472 +1,849 @@
 import os
 import random
 import sys
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QLabel, QLineEdit, QPushButton, QFileDialog, QMessageBox,
-                             QProgressBar, QGroupBox, QCheckBox)
-from PySide6.QtCore import Qt, QTimer, QThread, Signal
-from PySide6.QtGui import QFont
+import threading
+import subprocess
+from kivy.app import App
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.recycleview import RecycleView
+from kivy.uix.label import Label
+from kivy.uix.popup import Popup
+from kivy.uix.button import Button
+from kivy.uix.scrollview import ScrollView
+from kivy.uix.filechooser import FileChooserListView
+from kivy.properties import StringProperty, ListProperty, BooleanProperty, NumericProperty
+from kivy.clock import Clock
+from kivy.lang import Builder
+from kivy.core.window import Window
 
-class RenameWorker(QThread):
-    progress_updated = Signal(int, str)
-    finished = Signal(bool, str)
-    
-    def __init__(self, files, folder, pattern, add_number_prefix, parent=None):
-        super().__init__(parent)
+# CORREÇÃO: Importação compatível com múltiplas versões do Kivy.
+# Tenta importar 'dp' do novo local (Kivy >= 2.0) e, se falhar,
+# importa do local antigo (Kivy < 2.0).
+try:
+    from kivy.utils import dp
+except ImportError:
+    from kivy.metrics import dp
+
+# KV Language String: Define toda a interface do usuário.
+KV_STRING = """
+#:import sys sys
+
+# CORREÇÃO: A importação de 'dp' foi removida daqui e agora é
+# tratada no lado do Python para garantir a compatibilidade.
+# O Kivy encontrará 'dp' no escopo do Python automaticamente.
+
+# Definindo estilos para os widgets customizados.
+<GlassButton@Button>:
+    background_normal: ''
+    background_color: [0.2, 0.6, 0.8, 0.7] # Azul semi-transparente
+    color: [1, 1, 1, 1]
+    font_size: 16
+    size_hint_y: None
+    height: dp(40)
+    canvas.before:
+        Color:
+            rgba: self.background_color
+        RoundedRectangle:
+            size: self.size
+            pos: self.pos
+            radius: [dp(10)]
+
+<AccentButton@GlassButton>:
+    background_color: [0.08, 0.63, 0.52, 0.8] # Verde-azulado
+
+<WarningButton@GlassButton>:
+    background_color: [0.9, 0.3, 0.2, 0.8] # Vermelho de aviso
+
+<ShuffleButton@GlassButton>:
+    background_color: [0.96, 0.61, 0.07, 0.8] # Laranja
+
+<RenameButton@GlassButton>:
+    background_color: [0.18, 0.8, 0.44, 0.8] # Verde
+
+<DarkTextInput@TextInput>:
+    background_color: [0.2, 0.3, 0.4, 0.9]
+    foreground_color: [1, 1, 1, 1]
+    font_size: 16
+    padding: [dp(10), dp(10), dp(10), dp(10)]
+    multiline: False
+    size_hint_y: None
+    height: dp(40)
+    cursor_color: [0.08, 0.63, 0.52, 1]
+    border: [dp(8), dp(8), dp(8), dp(8)]
+
+<DarkLabel@Label>:
+    color: [1, 1, 1, 1]
+    font_size: 14
+    halign: 'left'
+    valign: 'middle'
+    size_hint_y: None
+    height: dp(30)
+    text_size: self.width, None
+
+<DarkCheckBox@CheckBox>:
+    color: [1, 1, 1, 1]
+    size_hint: None, None
+    width: dp(30)
+    height: dp(30)
+
+<DarkProgressBar@ProgressBar>:
+    size_hint_y: None
+    height: dp(25)
+    canvas:
+        Color:
+            rgba: [0.2, 0.3, 0.4, 0.7]
+        RoundedRectangle:
+            size: self.size
+            pos: self.pos
+            radius: [dp(5)]
+        Color:
+            rgba: [0.08, 0.63, 0.52, 0.9] # Verde-azulado para o progresso
+        RoundedRectangle:
+            size: self.size[0] * self.value / self.max if self.max > 0 else 0, self.size[1]
+            pos: self.pos
+            radius: [dp(5)]
+
+# MELHORIA: Widget para itens da lista de arquivos no RecycleView.
+<FileListItem>:
+    halign: 'left'
+    valign: 'top'
+    text_size: self.width, None
+    size_hint_y: None
+    height: self.texture_size[1] + dp(10) # Ajusta a altura baseada no conteúdo
+
+# Layout Principal
+BoxLayout:
+    orientation: 'horizontal'
+    padding: dp(10)
+    spacing: dp(10)
+
+    # Painel Esquerdo (Controles)
+    BoxLayout:
+        id: left_panel
+        orientation: 'vertical'
+        size_hint: 0.6, 1
+        spacing: dp(10)
+
+        DarkLabel:
+            text: app.ui_source_folder_label
+        BoxLayout:
+            size_hint_y: None
+            height: dp(40)
+            spacing: dp(5)
+            DarkTextInput:
+                id: txt_folder
+                text: app.folder_path
+                hint_text: app.ui_folder_hint
+                on_text: app.folder_path = self.text
+            GlassButton:
+                text: app.ui_browse_button
+                on_release: app.browse_folder('input')
+
+        DarkLabel:
+            text: app.ui_output_folder_label
+        BoxLayout:
+            size_hint_y: None
+            height: dp(40)
+            spacing: dp(5)
+            DarkTextInput:
+                id: txt_output_folder
+                text: app.output_folder_path
+                hint_text: app.ui_output_folder_hint
+                on_text: app.output_folder_path = self.text
+            GlassButton:
+                text: app.ui_browse_button
+                on_release: app.browse_folder('output')
+
+        GridLayout:
+            cols: 2
+            size_hint_y: None
+            height: dp(120)
+            spacing: dp(5)
+            DarkCheckBox:
+                id: chk_include_subfolders
+                active: app.include_subfolders_active
+                on_active: app.include_subfolders_active = self.active
+            DarkLabel:
+                text: app.ui_include_subfolders_label
+            DarkCheckBox:
+                id: chk_open_output_folder
+                active: app.open_output_folder_after_rename
+                on_active: app.open_output_folder_after_rename = self.active
+            DarkLabel:
+                text: app.ui_open_folder_label
+            DarkCheckBox:
+                id: chk_sanitize_names
+                active: app.sanitize_names_active
+                on_active: app.sanitize_names_active = self.active
+            DarkLabel:
+                text: app.ui_sanitize_names_label
+
+        Widget:
+            size_hint_y: None
+            height: dp(15)
+
+        DarkLabel:
+            text: app.ui_extensions_label
+        DarkTextInput:
+            id: txt_extensions
+            text: app.supported_extensions_text
+            on_text: app.on_extensions_text_changed(self.text)
+        
+        DarkLabel:
+            text: app.ui_format_label
+        DarkTextInput:
+            id: txt_format
+            text: "{index} - {name}"
+            on_text: app.update_preview()
+            disabled: chk_add_prefix.active
+        
+        BoxLayout:
+            size_hint_y: None
+            height: dp(40)
+            spacing: dp(5)
+            DarkCheckBox:
+                id: chk_add_prefix
+                active: True
+                on_active: app.update_preview()
+            DarkLabel:
+                text: app.ui_add_prefix_label
+
+        Widget:
+            size_hint_y: None
+            height: dp(15)
+
+        BoxLayout:
+            size_hint_y: None
+            height: dp(50)
+            spacing: dp(10)
+            ShuffleButton:
+                id: btn_shuffle
+                text: app.ui_shuffle_button
+                on_release: app.shuffle_files()
+            RenameButton:
+                id: btn_rename
+                text: app.ui_rename_button
+                on_release: app.confirm_rename()
+            WarningButton:
+                id: btn_cancel
+                text: app.ui_cancel_button
+                on_release: app.cancel_operation()
+                disabled: True
+            GlassButton:
+                id: btn_clear_reset
+                text: app.ui_clear_button
+                on_release: app.clear_reset_app()
+        
+        Widget:
+            size_hint_y: None
+            height: dp(15)
+
+        DarkProgressBar:
+            id: progress_bar
+            max: app.progress_max
+            value: app.progress_value
+        DarkLabel:
+            id: lbl_status
+            text: app.status_text
+
+        # Espaçador para empurrar botões para baixo
+        Widget: 
+
+        BoxLayout:
+            size_hint_y: None
+            height: dp(40)
+            spacing: dp(10)
+            AccentButton:
+                id: btn_lang_pt
+                text: "Português"
+                on_release: app.set_language("pt")
+                background_color: [0.08, 0.63, 0.52, 0.8] if app.language == 'pt' else [0.2, 0.6, 0.8, 0.7]
+            GlassButton:
+                id: btn_lang_en
+                text: "English"
+                on_release: app.set_language("en")
+                background_color: [0.08, 0.63, 0.52, 0.8] if app.language == 'en' else [0.2, 0.6, 0.8, 0.7]
+            GlassButton:
+                text: app.ui_help_button
+                on_release: app.show_help_popup()
+            GlassButton:
+                text: app.ui_about_button
+                on_release: app.show_about_popup()
+
+    # Painel Direito (Lista de Arquivos e Pré-visualização)
+    BoxLayout:
+        orientation: 'vertical'
+        size_hint: 0.4, 1
+        padding: dp(10)
+        spacing: dp(10)
+
+        DarkLabel:
+            text: app.ui_files_found_label
+        DarkTextInput:
+            id: txt_search_files
+            hint_text: app.ui_search_hint
+            on_text: app.on_search_text_changed(self.text)
+        
+        RecycleView:
+            id: file_list_rv
+            viewclass: 'FileListItem'
+            data: app.recycle_view_data
+            RecycleBoxLayout:
+                default_size: None, dp(30)
+                default_size_hint: 1, None
+                size_hint_y: None
+                height: self.minimum_height
+                orientation: 'vertical'
+                spacing: dp(2)
+        
+        DarkLabel:
+            text: app.ui_rename_preview_label
+        DarkLabel:
+            id: lbl_preview
+            text: app.preview_text
+"""
+
+# Classe para o item da lista de arquivos do RecycleView
+class FileListItem(Label):
+    pass
+
+# Worker para renomear arquivos em uma thread separada
+class RenameWorker(threading.Thread):
+    def __init__(self, files, folder, pattern, add_number_prefix, app_instance, output_folder=None, sanitize_names=False):
+        super().__init__()
         self.files = files
         self.folder = folder
         self.pattern = pattern
         self.add_number_prefix = add_number_prefix
+        self.app_instance = app_instance
+        self.output_folder = output_folder if output_folder else folder
+        self.sanitize_names = sanitize_names
         self._is_running = True
-        
+
+    def _sanitize_filename(self, filename):
+        if not self.sanitize_names:
+            return filename
+        invalid_chars = '<>:"/\\|?*'
+        for char in invalid_chars:
+            filename = filename.replace(char, '_')
+        filename = ' '.join(filename.split())
+        return filename.strip()
+
     def run(self):
         try:
-            for i, file in enumerate(self.files):
+            total_files = len(self.files)
+            for i, file_relative_path in enumerate(self.files):
                 if not self._is_running:
                     break
-                    
-                index = str(i + 1).zfill(len(str(len(self.files))))
-                name, ext = os.path.splitext(file)
+
+                original_full_path = os.path.join(self.folder, file_relative_path)
+                file_name_only = os.path.basename(file_relative_path)
+
+                index = str(i + 1).zfill(len(str(total_files)))
+                name, ext = os.path.splitext(file_name_only)
                 
+                name = self._sanitize_filename(name)
+
                 if self.add_number_prefix:
-                    new_name = f"{index} - {name}{ext}"
+                    new_name_base = f"{index} - {name}"
                 else:
-                    new_name = self.pattern.replace("{index}", index).replace("{name}", name) + ext
+                    new_name_base = self.pattern.replace("{index}", index).replace("{name}", name)
                 
-                old_path = os.path.join(self.folder, file)
-                new_path = os.path.join(self.folder, new_name)
+                new_name_with_ext = new_name_base + ext
+                relative_dir = os.path.dirname(file_relative_path)
                 
-                # Handle potential name collisions
+                output_dir = os.path.join(self.output_folder, relative_dir)
+                os.makedirs(output_dir, exist_ok=True)
+
+                new_full_path = os.path.join(output_dir, new_name_with_ext)
+
                 counter = 1
-                while os.path.exists(new_path):
-                    new_name = f"{name} ({counter}){ext}"
-                    new_path = os.path.join(self.folder, new_name)
+                while os.path.exists(new_full_path) and original_full_path.lower() != new_full_path.lower():
+                    new_name_collision = f"{new_name_base} ({counter}){ext}"
+                    new_full_path = os.path.join(output_dir, new_name_collision)
                     counter += 1
                 
-                os.rename(old_path, new_path)
-                self.progress_updated.emit(i + 1, new_name)
+                if original_full_path.lower() != new_full_path.lower():
+                    os.rename(original_full_path, new_full_path)
                 
-            self.finished.emit(self._is_running, "Operation completed successfully" if self._is_running else "Operation cancelled")
-            
+                Clock.schedule_once(lambda dt, cur=i + 1, n_name=os.path.basename(new_full_path):
+                                    self.app_instance.on_rename_progress(cur, n_name))
+
+            final_message = "Operação concluída com sucesso" if self._is_running else "Operação cancelada"
+            Clock.schedule_once(lambda dt, success=self._is_running, msg=final_message:
+                                self.app_instance.on_rename_finished(success, msg))
         except Exception as e:
-            self.finished.emit(False, f"Error: {str(e)}")
-            
+            Clock.schedule_once(lambda dt, msg=f"Erro: {str(e)}":
+                                self.app_instance.on_rename_finished(False, msg))
+
     def stop(self):
         self._is_running = False
 
-class ShuffleTune(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        
-        # Window settings
-        self.setWindowTitle("ShuffleTune - MP3 Shuffler")
-        self.setGeometry(100, 100, 900, 500)
-        self.setMinimumSize(700, 400)
-        
-        # State variables
-        self.files = []
-        self.language = "en"  # "pt" or "en"
-        self.rename_worker = None
-        
-        # Create widgets
-        self.create_widgets()
-        self.setup_ui()
-        self.setup_styles()
-        self.connect_signals()
-        
-        # Initialize with English
-        self.set_language("en")
-        
-    def create_widgets(self):
-        """Create all necessary widgets"""
-        # Folder selection widgets
-        self.lbl_folder = QLabel()
-        self.txt_folder = QLineEdit()
-        self.txt_folder.setPlaceholderText("Select folder containing MP3 files")
-        self.btn_browse = QPushButton()
-        
-        # Format widgets
-        self.lbl_format = QLabel()
-        self.txt_format = QLineEdit("{index} - {name}")
-        self.chk_add_prefix = QCheckBox("Add sequential number prefix")
-        self.chk_add_prefix.setChecked(True)
-        
-        # Action buttons
-        self.btn_shuffle = QPushButton()
-        self.btn_rename = QPushButton()
-        self.btn_cancel = QPushButton("Cancel")
-        self.btn_cancel.setVisible(False)
-        
-        # Progress bar
-        self.progress = QProgressBar()
-        self.progress.setAlignment(Qt.AlignCenter)
-        self.lbl_status = QLabel("Ready")
-        self.lbl_status.setAlignment(Qt.AlignCenter)
-        
-        # Language buttons
-        self.btn_lang_pt = QPushButton("Português")
-        self.btn_lang_en = QPushButton("English")
-        
-        # Instructions group
-        self.grp_instructions = QGroupBox()
-        self.lbl_instructions = QLabel()
-        self.lbl_instructions.setWordWrap(True)
-        
-        # Preview
-        self.grp_preview = QGroupBox("Preview")
-        self.lbl_preview = QLabel("Original name -> New name")
-        self.lbl_preview.setWordWrap(True)
-        
-    def setup_ui(self):
-        """Organize widgets in the interface"""
-        main_widget = QWidget()
-        self.setCentralWidget(main_widget)
-        
-        # Main layout
-        main_layout = QHBoxLayout()
-        main_widget.setLayout(main_layout)
-        
-        # Left panel (controls)
-        left_panel = QWidget()
-        left_layout = QVBoxLayout()
-        left_panel.setLayout(left_layout)
-        
-        # Right panel (instructions and preview)
-        right_panel = QWidget()
-        right_layout = QVBoxLayout()
-        right_panel.setLayout(right_layout)
-        
-        # Add widgets to left panel
-        left_layout.addWidget(self.lbl_folder)
-        left_layout.addWidget(self.txt_folder)
-        left_layout.addWidget(self.btn_browse)
-        left_layout.addSpacing(15)
-        
-        left_layout.addWidget(self.lbl_format)
-        left_layout.addWidget(self.txt_format)
-        left_layout.addWidget(self.chk_add_prefix)
-        left_layout.addSpacing(15)
-        
-        # Layout for action buttons
-        btn_layout = QHBoxLayout()
-        btn_layout.addWidget(self.btn_shuffle)
-        btn_layout.addWidget(self.btn_rename)
-        btn_layout.addWidget(self.btn_cancel)
-        left_layout.addLayout(btn_layout)
-        left_layout.addSpacing(15)
-        
-        left_layout.addWidget(self.progress)
-        left_layout.addWidget(self.lbl_status)
-        left_layout.addStretch()
-        
-        # Layout for language buttons
-        lang_layout = QHBoxLayout()
-        lang_layout.addWidget(self.btn_lang_pt)
-        lang_layout.addWidget(self.btn_lang_en)
-        left_layout.addLayout(lang_layout)
-        
-        # Add instructions to right panel
-        right_layout.addWidget(self.grp_instructions)
-        instructions_inner = QVBoxLayout()
-        instructions_inner.addWidget(self.lbl_instructions)
-        self.grp_instructions.setLayout(instructions_inner)
-        
-        # Add preview to right panel
-        right_layout.addWidget(self.grp_preview)
-        preview_inner = QVBoxLayout()
-        preview_inner.addWidget(self.lbl_preview)
-        self.grp_preview.setLayout(preview_inner)
-        
-        right_layout.addStretch()
-        
-        # Add panels to main layout
-        main_layout.addWidget(left_panel, 60)
-        main_layout.addWidget(right_panel, 40)
-        
-    def setup_styles(self):
-        """Apply CSS styles"""
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #2C3E50;
-            }
-            QLabel, QGroupBox {
-                color: white;
-                font-size: 14px;
-            }
-            QGroupBox {
-                border: 1px solid #34495E;
-                border-radius: 5px;
-                margin-top: 10px;
-                padding-top: 15px;
-            }
-            QLineEdit, QPushButton {
-                padding: 8px;
-                font-size: 14px;
-                border-radius: 4px;
-            }
-            QPushButton {
-                min-width: 100px;
-                background-color: #3498db;
-                color: white;
-            }
-            QPushButton:hover {
-                background-color: #2980b9;
-            }
-            QPushButton:pressed {
-                background-color: #1c6da8;
-            }
-            QPushButton:disabled {
-                background-color: #95a5a6;
-            }
-            #btn_shuffle {
-                background-color: #f39c12;
-            }
-            #btn_shuffle:hover {
-                background-color: #e67e22;
-            }
-            #btn_rename {
-                background-color: #2ecc71;
-            }
-            #btn_rename:hover {
-                background-color: #27ae60;
-            }
-            #btn_cancel {
-                background-color: #e74c3c;
-            }
-            #btn_cancel:hover {
-                background-color: #c0392b;
-            }
-            QProgressBar {
-                height: 25px;
-                text-align: center;
-                border: 1px solid #34495E;
-                border-radius: 4px;
-            }
-            QProgressBar::chunk {
-                background-color: #3498db;
-                border-radius: 2px;
-            }
-            QLineEdit {
-                background-color: #34495E;
-                color: white;
-                border: 1px solid #3d566e;
-            }
-            QCheckBox {
-                color: white;
-                spacing: 5px;
-            }
-            QCheckBox::indicator {
-                width: 16px;
-                height: 16px;
-            }
-        """)
-        
-        # IDs for specific styling
-        self.btn_shuffle.setObjectName("btn_shuffle")
-        self.btn_rename.setObjectName("btn_rename")
-        self.btn_cancel.setObjectName("btn_cancel")
-        
-        # Font for status label
-        font = QFont()
-        font.setItalic(True)
-        self.lbl_status.setFont(font)
-        
-    def connect_signals(self):
-        """Connect signals to slots"""
-        self.btn_browse.clicked.connect(self.browse_folder)
-        self.btn_shuffle.clicked.connect(self.shuffle_files)
-        self.btn_rename.clicked.connect(self.rename_files)
-        self.btn_cancel.clicked.connect(self.cancel_operation)
-        self.btn_lang_pt.clicked.connect(lambda: self.set_language("pt"))
-        self.btn_lang_en.clicked.connect(lambda: self.set_language("en"))
-        self.txt_folder.textChanged.connect(self.update_file_list)
-        self.txt_format.textChanged.connect(self.update_preview)
-        self.chk_add_prefix.toggled.connect(self.on_add_prefix_toggled)
-        
-    def on_add_prefix_toggled(self, checked):
-        """Enable/disable format field based on checkbox"""
-        self.txt_format.setEnabled(not checked)
+# Classe principal da Aplicação
+class ShuffleTuneApp(App):
+    # --- Propriedades de Estado ---
+    language = StringProperty("pt")
+    folder_path = StringProperty("")
+    output_folder_path = StringProperty("")
+    status_text = StringProperty("")
+    preview_text = StringProperty("")
+    mp3_files = ListProperty([])
+    filtered_files = ListProperty([])
+    progress_value = NumericProperty(0)
+    progress_max = NumericProperty(100)
+    include_subfolders_active = BooleanProperty(False)
+    open_output_folder_after_rename = BooleanProperty(False)
+    sanitize_names_active = BooleanProperty(False)
+    supported_extensions_text = StringProperty("mp3, wav, flac, ogg, m4a")
+    supported_extensions = ListProperty(['.mp3', '.wav', '.flac', '.ogg', '.m4a'])
+    rename_worker = None
+    
+    # --- Propriedades de UI para Internacionalização ---
+    ui_source_folder_label = StringProperty()
+    ui_output_folder_label = StringProperty()
+    ui_folder_hint = StringProperty()
+    ui_output_folder_hint = StringProperty()
+    ui_browse_button = StringProperty()
+    ui_include_subfolders_label = StringProperty()
+    ui_open_folder_label = StringProperty()
+    ui_sanitize_names_label = StringProperty()
+    ui_extensions_label = StringProperty()
+    ui_format_label = StringProperty()
+    ui_add_prefix_label = StringProperty()
+    ui_shuffle_button = StringProperty()
+    ui_rename_button = StringProperty()
+    ui_cancel_button = StringProperty()
+    ui_clear_button = StringProperty()
+    ui_help_button = StringProperty()
+    ui_about_button = StringProperty()
+    ui_files_found_label = StringProperty()
+    ui_search_hint = StringProperty()
+    ui_rename_preview_label = StringProperty()
+    ui_yes_button = StringProperty()
+    ui_no_button = StringProperty()
+    ui_select_button = StringProperty()
+    ui_ready_status = StringProperty()
+    ui_files_found_status = StringProperty()
+    ui_no_files_found = StringProperty()
+    ui_and_more_files_status = StringProperty()
+    ui_original_to_new_name = StringProperty()
+    ui_no_files_to_shuffle = StringProperty()
+    ui_shuffled_successfully = StringProperty()
+    ui_select_folder_first = StringProperty()
+    ui_no_files_to_rename = StringProperty()
+    ui_pattern_error = StringProperty()
+    ui_confirm_rename_title = StringProperty()
+    ui_confirm_rename_message = StringProperty()
+    ui_select_folder_title = StringProperty()
+    ui_starting_rename = StringProperty()
+    ui_renaming_status = StringProperty()
+    ui_op_completed = StringProperty()
+    ui_op_failed = StringProperty()
+    ui_dest_folder_not_found = StringProperty()
+    ui_cancelling_op = StringProperty()
+    
+    # --- Propriedade de Dados para RecycleView ---
+    recycle_view_data = ListProperty()
+
+    def build(self):
+        Window.clearcolor = (0.17, 0.24, 0.31, 1)
+        return Builder.load_string(KV_STRING)
+
+    def on_start(self):
+        self.set_language(self.language)
+        self.bind(folder_path=self.on_folder_or_subfolder_changed,
+                  include_subfolders_active=self.on_folder_or_subfolder_changed)
         self.update_preview()
         
-    def update_file_list(self):
-        """Update the file list when folder changes"""
-        folder = self.txt_folder.text()
-        if folder and os.path.isdir(folder):
-            self.files = [f for f in os.listdir(folder) if f.lower().endswith('.mp3')]
-            self.lbl_status.setText(f"Found {len(self.files)} MP3 files")
-            self.update_preview()
-        else:
-            self.files = []
-            self.lbl_status.setText("Ready")
-            
-    def update_preview(self):
-        """Update the preview of renaming"""
-        if not self.files:
-            self.lbl_preview.setText("Original name -> New name")
+    def on_folder_or_subfolder_changed(self, *args):
+        folder = self.folder_path
+        if not (folder and os.path.isdir(folder)):
+            self.mp3_files = []
+            self.filtered_files = []
+            if hasattr(self, 'ui_ready_status'): # Garante que a UI foi inicializada
+                self.status_text = self.ui_ready_status
+                self.update_file_list_display()
+                self.update_preview()
             return
+
+        temp_files = []
+        try:
+            if self.include_subfolders_active:
+                for root, _, files in os.walk(folder):
+                    for f in files:
+                        if os.path.splitext(f)[1].lower() in self.supported_extensions:
+                            temp_files.append(os.path.relpath(os.path.join(root, f), folder))
+            else:
+                for f in os.listdir(folder):
+                    full_path = os.path.join(folder, f)
+                    if os.path.isfile(full_path) and os.path.splitext(f)[1].lower() in self.supported_extensions:
+                        temp_files.append(f)
             
-        sample_file = self.files[0]
-        name, ext = os.path.splitext(sample_file)
+            self.mp3_files = sorted(temp_files)
+            self.on_search_text_changed(self.root.ids.txt_search_files.text if self.root else "")
+            self.status_text = self.ui_files_found_status.format(count=len(self.mp3_files))
+            self.update_preview()
+        except OSError as e:
+            self.show_message("Erro de Permissão", f"Não foi possível acessar a pasta:\n{e}", 'error')
+            self.mp3_files = []
+            self.filtered_files = []
+
+    def on_extensions_text_changed(self, value):
+        ext_list = [f".{ext.strip().lower()}" for ext in value.split(',') if ext.strip()]
+        self.supported_extensions = ext_list if ext_list else ['.mp3']
+        self.on_folder_or_subfolder_changed()
+
+    def on_search_text_changed(self, value):
+        search_term = value.lower()
+        if search_term:
+            self.filtered_files = [f for f in self.mp3_files if search_term in os.path.basename(f).lower()]
+        else:
+            self.filtered_files = list(self.mp3_files)
+        self.update_file_list_display()
+
+    def update_file_list_display(self):
+        if not self.filtered_files:
+            self.recycle_view_data = [{'text': self.ui_no_files_found}]
+        else:
+            display_limit = 100
+            self.recycle_view_data = [{'text': os.path.basename(f)} for f in self.filtered_files[:display_limit]]
+            if len(self.filtered_files) > display_limit:
+                 self.recycle_view_data.append({'text': f"\n... {self.ui_and_more_files_status}"})
+
+    def update_preview(self, *args):
+        if not self.root: return
+        if not self.filtered_files:
+            self.preview_text = self.ui_original_to_new_name
+            return
+
+        sample_file_name_only = os.path.basename(self.filtered_files[0])
+        name, ext = os.path.splitext(sample_file_name_only)
         
-        if self.chk_add_prefix.isChecked():
+        if self.sanitize_names_active:
+            name = self._sanitize_filename_preview(name)
+
+        if self.root.ids.chk_add_prefix.active:
             new_name = f"001 - {name}{ext}"
         else:
-            pattern = self.txt_format.text()
+            pattern = self.root.ids.txt_format.text
             new_name = pattern.replace("{index}", "001").replace("{name}", name) + ext
-            
-        self.lbl_preview.setText(f"{sample_file} -> {new_name}")
+
+        self.preview_text = f"{sample_file_name_only} -> {new_name}"
+
+    def _sanitize_filename_preview(self, filename):
+        invalid_chars = '<>:"/\\|?*'
+        for char in invalid_chars:
+            filename = filename.replace(char, '_')
+        return ' '.join(filename.split()).strip()
+
+    def browse_folder(self, folder_type):
+        if sys.platform == 'android':
+            self.show_message("Função Indisponível", "O seletor de pastas não é suportado em Android.", 'error')
+            return
+
+        initial_path = os.path.expanduser('~')
+        if folder_type == 'input' and self.folder_path and os.path.isdir(self.folder_path):
+            initial_path = self.folder_path
         
-    def browse_folder(self):
-        """Open dialog to select folder"""
-        folder = QFileDialog.getExistingDirectory(self, "Select Folder")
-        if folder:
-            self.txt_folder.setText(folder)
-            
-    def shuffle_files(self):
-        """Shuffle the MP3 files"""
-        if not self.txt_folder.text():
-            self.show_message("Error", "Please select a folder first", QMessageBox.Warning)
+        content = BoxLayout(orientation='vertical')
+        file_chooser = FileChooserListView(path=initial_path, dirselect=True)
+        content.add_widget(file_chooser)
+        
+        btn_layout = BoxLayout(size_hint_y=None, height=dp(44))
+        btn_select = Button(text=self.ui_select_button)
+        btn_cancel = Button(text=self.ui_cancel_button)
+        btn_layout.add_widget(btn_select)
+        btn_layout.add_widget(btn_cancel)
+        content.add_widget(btn_layout)
+
+        popup = Popup(title=self.ui_select_folder_title, content=content, size_hint=(0.9, 0.9))
+        
+        def select_path(instance):
+            if file_chooser.selection:
+                selected_dir = file_chooser.selection[0]
+                if folder_type == 'input':
+                    self.folder_path = selected_dir
+                else:
+                    self.output_folder_path = selected_dir
+            popup.dismiss()
+        
+        btn_select.bind(on_release=select_path)
+        btn_cancel.bind(on_release=popup.dismiss)
+        popup.open()
+        
+    def shuffle_files(self, *args):
+        if not self.mp3_files:
+            self.show_message("Erro", self.ui_no_files_to_shuffle, 'error')
             return
-            
-        if not self.files:
-            self.show_message("Error", "No MP3 files found", QMessageBox.Warning)
-            return
-            
-        random.shuffle(self.files)
-        self.show_message("Success", "Files shuffled successfully!", QMessageBox.Information)
+        random.shuffle(self.mp3_files)
+        self.on_search_text_changed(self.root.ids.txt_search_files.text)
         self.update_preview()
-        
-    def rename_files(self):
-        """Rename files according to the pattern"""
-        folder = self.txt_folder.text()
-        if not folder:
-            self.show_message("Error", "Please select a folder first", QMessageBox.Warning)
+        self.show_message("Sucesso", self.ui_shuffled_successfully, 'info')
+
+    def confirm_rename(self, *args):
+        if not self.folder_path or not os.path.isdir(self.folder_path):
+            self.show_message("Erro", self.ui_select_folder_first, 'error')
             return
-            
-        if not self.files:
-            self.show_message("Error", "No MP3 files found", QMessageBox.Warning)
+        if not self.mp3_files:
+            self.show_message("Erro", self.ui_no_files_to_rename, 'error')
             return
-            
-        if not self.chk_add_prefix.isChecked():
-            pattern = self.txt_format.text()
+        if not self.root.ids.chk_add_prefix.active:
+            pattern = self.root.ids.txt_format.text
             if "{index}" not in pattern and "{name}" not in pattern:
-                self.show_message("Error", "Pattern must contain {index} or {name}", QMessageBox.Warning)
+                self.show_message("Erro", self.ui_pattern_error, 'error')
                 return
-                
-        # Disable buttons during operation
-        self.btn_shuffle.setDisabled(True)
-        self.btn_rename.setDisabled(True)
-        self.btn_browse.setDisabled(True)
-        self.btn_cancel.setVisible(True)
-        
-        self.progress.setMaximum(len(self.files))
-        self.progress.setValue(0)
-        self.lbl_status.setText("Starting renaming...")
-        
-        # Start worker thread
+
+        content = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(10))
+        content.add_widget(Label(text=self.ui_confirm_rename_message, text_size=(Window.width * 0.7, None), halign='center'))
+        btn_layout = BoxLayout(orientation='horizontal', spacing=dp(10), size_hint_y=None, height=dp(40))
+        btn_yes = Button(text=self.ui_yes_button)
+        btn_no = Button(text=self.ui_no_button)
+        btn_layout.add_widget(btn_yes)
+        btn_layout.add_widget(btn_no)
+        content.add_widget(btn_layout)
+        popup = Popup(title=self.ui_confirm_rename_title, content=content, size_hint=(0.8, 0.5), auto_dismiss=False)
+        btn_yes.bind(on_release=lambda x: self._proceed_with_rename(popup))
+        btn_no.bind(on_release=popup.dismiss)
+        popup.open()
+
+    def _proceed_with_rename(self, popup_instance):
+        popup_instance.dismiss()
+        self.toggle_ui_elements(True)
+        self.progress_max = len(self.mp3_files)
+        self.progress_value = 0
+        self.status_text = self.ui_starting_rename
         self.rename_worker = RenameWorker(
-            self.files,
-            folder,
-            self.txt_format.text(),
-            self.chk_add_prefix.isChecked()
-        )
-        self.rename_worker.progress_updated.connect(self.on_rename_progress)
-        self.rename_worker.finished.connect(self.on_rename_finished)
+            self.mp3_files, self.folder_path, self.root.ids.txt_format.text,
+            self.root.ids.chk_add_prefix.active, self,
+            output_folder=self.output_folder_path if self.output_folder_path else None,
+            sanitize_names=self.sanitize_names_active)
         self.rename_worker.start()
-        
+
     def on_rename_progress(self, current, new_name):
-        """Update progress during renaming"""
-        self.progress.setValue(current)
-        self.lbl_status.setText(f"Renaming: {new_name}")
+        self.progress_value = current
+        self.status_text = self.ui_renaming_status.format(new_name=new_name, current=current, total=self.progress_max)
         
     def on_rename_finished(self, success, message):
-        """Handle completion of renaming"""
-        self.btn_shuffle.setDisabled(False)
-        self.btn_rename.setDisabled(False)
-        self.btn_browse.setDisabled(False)
-        self.btn_cancel.setVisible(False)
-        
+        self.toggle_ui_elements(False)
         if success:
-            self.lbl_status.setText("Operation completed successfully")
-            self.show_message("Success", message, QMessageBox.Information)
+            self.status_text = self.ui_op_completed
+            self.show_message("Sucesso", message, 'info')
+            if self.open_output_folder_after_rename:
+                self.open_folder_in_explorer(self.output_folder_path if self.output_folder_path else self.folder_path)
         else:
-            self.lbl_status.setText("Operation failed")
-            self.show_message("Error", message, QMessageBox.Critical)
-            
-        # Refresh file list
-        self.update_file_list()
-        
-    def cancel_operation(self):
-        """Cancel the current renaming operation"""
-        if self.rename_worker and self.rename_worker.isRunning():
+            self.status_text = self.ui_op_failed
+            self.show_message("Erro", message, 'error')
+        self.on_folder_or_subfolder_changed()
+
+    def open_folder_in_explorer(self, path):
+        if not os.path.isdir(path):
+            self.show_message("Erro", self.ui_dest_folder_not_found, 'error')
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(os.path.realpath(path))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            self.show_message("Erro", f"Não foi possível abrir a pasta:\n{e}", 'error')
+
+    def cancel_operation(self, *args):
+        if self.rename_worker and self.rename_worker.is_alive():
             self.rename_worker.stop()
-            self.lbl_status.setText("Cancelling operation...")
-            
+            self.status_text = self.ui_cancelling_op
+
+    def clear_reset_app(self, *args):
+        self.folder_path = ""
+        self.output_folder_path = ""
+        self.root.ids.txt_format.text = "{index} - {name}"
+        self.root.ids.chk_add_prefix.active = True
+        self.include_subfolders_active = False
+        self.open_output_folder_after_rename = False
+        self.sanitize_names_active = False
+        self.supported_extensions_text = "mp3, wav, flac, ogg, m4a"
+        self.root.ids.txt_search_files.text = ""
+        self.progress_value = 0
+        self.on_folder_or_subfolder_changed()
+
+    def toggle_ui_elements(self, is_running):
+        for widget_id in self.root.ids:
+            if widget_id not in ['btn_cancel', 'progress_bar', 'lbl_status', 'file_list_rv']:
+                self.root.ids[widget_id].disabled = is_running
+        self.root.ids.btn_cancel.disabled = not is_running
+
     def set_language(self, lang):
-        """Change the interface language"""
         self.language = lang
         if lang == "pt":
-            self.setWindowTitle("ShuffleTune - Embaralhador de MP3")
-            self.lbl_folder.setText("Pasta:")
-            self.txt_folder.setPlaceholderText("Selecione a pasta com arquivos MP3")
-            self.btn_browse.setText("Procurar")
-            self.lbl_format.setText("Formato:")
-            self.chk_add_prefix.setText("Adicionar prefixo numérico sequencial")
-            self.btn_shuffle.setText("Embaralhar")
-            self.btn_rename.setText("Renomear")
-            self.btn_cancel.setText("Cancelar")
-            self.grp_instructions.setTitle("Instruções:")
-            self.lbl_instructions.setText(
-                "1. Selecione uma pasta com arquivos MP3\n"
-                "2. Defina o formato de renomeação\n"
-                "3. Embaralhe os arquivos\n"
-                "4. Renomeie com a nova ordem\n\n"
-                "Dicas:\n"
-                "- Use {index} para o número sequencial\n"
-                "- Use {name} para o nome original\n"
-                "- Marque a opção para adicionar prefixo automático"
-            )
-            self.grp_preview.setTitle("Pré-visualização")
-            self.lbl_preview.setText("Nome original -> Novo nome")
-            self.btn_lang_pt.setStyleSheet("background-color: #16a085;")
-            self.btn_lang_en.setStyleSheet("")
-        else:
-            self.setWindowTitle("ShuffleTune - MP3 Shuffler")
-            self.lbl_folder.setText("Folder:")
-            self.txt_folder.setPlaceholderText("Select folder containing MP3 files")
-            self.btn_browse.setText("Browse")
-            self.lbl_format.setText("Format:")
-            self.chk_add_prefix.setText("Add sequential number prefix")
-            self.btn_shuffle.setText("Shuffle")
-            self.btn_rename.setText("Rename")
-            self.btn_cancel.setText("Cancel")
-            self.grp_instructions.setTitle("Instructions:")
-            self.lbl_instructions.setText(
-                "1. Select a folder with MP3 files\n"
-                "2. Set the renaming pattern\n"
-                "3. Shuffle the files\n"
-                "4. Rename with new order\n\n"
-                "Tips:\n"
-                "- Use {index} for sequential number\n"
-                "- Use {name} for original name\n"
-                "- Check option for automatic prefix"
-            )
-            self.grp_preview.setTitle("Preview")
-            self.lbl_preview.setText("Original name -> New name")
-            self.btn_lang_pt.setStyleSheet("")
-            self.btn_lang_en.setStyleSheet("background-color: #16a085;")
-            
-    def show_message(self, title, message, icon):
-        """Show a message box"""
-        msg = QMessageBox(self)
-        msg.setWindowTitle(title)
-        msg.setText(message)
-        msg.setIcon(icon)
-        msg.exec()
+            self.title = "ShuffleTune - Renomeador de Arquivos"
+            self.ui_source_folder_label = "Pasta de Origem:"
+            self.ui_output_folder_label = "Pasta de Destino (opcional):"
+            self.ui_folder_hint = "Selecione a pasta com os arquivos"
+            self.ui_output_folder_hint = "Deixe em branco para usar a pasta de origem"
+            self.ui_browse_button = "Procurar"
+            self.ui_include_subfolders_label = "Incluir Subpastas"
+            self.ui_open_folder_label = "Abrir pasta de destino ao concluir"
+            self.ui_sanitize_names_label = "Limpar nomes (remover caracteres inválidos)"
+            self.ui_extensions_label = "Extensões (separadas por vírgula):"
+            self.ui_format_label = "Formato da Renomeação:"
+            self.ui_add_prefix_label = "Adicionar prefixo numérico sequencial"
+            self.ui_shuffle_button = "Embaralhar"
+            self.ui_rename_button = "Renomear"
+            self.ui_cancel_button = "Cancelar"
+            self.ui_clear_button = "Limpar"
+            self.ui_help_button = "Ajuda"
+            self.ui_about_button = "Sobre"
+            self.ui_files_found_label = "Arquivos Encontrados:"
+            self.ui_search_hint = "Buscar arquivos..."
+            self.ui_rename_preview_label = "Pré-visualização:"
+            self.ui_yes_button = "Sim"
+            self.ui_no_button = "Não"
+            self.ui_select_button = "Selecionar"
+            self.ui_ready_status = "Pronto"
+            # CORREÇÃO: Removido um par de chaves extra.
+            self.ui_files_found_status = "{count} arquivos encontrados"
+            self.ui_no_files_found = "Nenhum arquivo encontrado ou filtrado."
+            self.ui_and_more_files_status = "e mais..."
+            self.ui_original_to_new_name = "Original -> Novo Nome"
+            self.ui_no_files_to_shuffle = "Nenhum arquivo encontrado para embaralhar."
+            self.ui_shuffled_successfully = "Arquivos embaralhados com sucesso!"
+            self.ui_select_folder_first = "Por favor, selecione uma pasta de origem primeiro."
+            self.ui_no_files_to_rename = "Nenhum arquivo encontrado para renomear."
+            self.ui_pattern_error = "O padrão deve conter '{index}' ou '{name}'."
+            self.ui_confirm_rename_title = "Confirmar Renomeação"
+            self.ui_confirm_rename_message = "Tem certeza?\\nEsta operação modifica os arquivos permanentemente."
+            self.ui_select_folder_title = "Selecionar Pasta"
+            self.ui_starting_rename = "Iniciando renomeação..."
+            self.ui_renaming_status = "Renomeando: {new_name} ({current}/{total})"
+            self.ui_op_completed = "Operação concluída com sucesso."
+            self.ui_op_failed = "Operação falhou ou foi cancelada."
+            self.ui_dest_folder_not_found = "Pasta de destino não encontrada."
+            self.ui_cancelling_op = "Cancelando operação..."
+        else: # English
+            self.title = "ShuffleTune - File Renamer"
+            self.ui_source_folder_label = "Source Folder:"
+            self.ui_output_folder_label = "Output Folder (optional):"
+            self.ui_folder_hint = "Select the folder with your files"
+            self.ui_output_folder_hint = "Leave blank to use the source folder"
+            self.ui_browse_button = "Browse"
+            self.ui_include_subfolders_label = "Include Subfolders"
+            self.ui_open_folder_label = "Open output folder when done"
+            self.ui_sanitize_names_label = "Sanitize names (remove invalid chars)"
+            self.ui_extensions_label = "Extensions (comma-separated):"
+            self.ui_format_label = "Renaming Pattern:"
+            self.ui_add_prefix_label = "Add sequential number prefix"
+            self.ui_shuffle_button = "Shuffle"
+            self.ui_rename_button = "Rename"
+            self.ui_cancel_button = "Cancel"
+            self.ui_clear_button = "Clear"
+            self.ui_help_button = "Help"
+            self.ui_about_button = "About"
+            self.ui_files_found_label = "Files Found:"
+            self.ui_search_hint = "Search files..."
+            self.ui_rename_preview_label = "Preview:"
+            self.ui_yes_button = "Yes"
+            self.ui_no_button = "No"
+            self.ui_select_button = "Select"
+            self.ui_ready_status = "Ready"
+            self.ui_files_found_status = "Found {count} files"
+            self.ui_no_files_found = "No files found or filtered."
+            self.ui_and_more_files_status = "and more..."
+            self.ui_original_to_new_name = "Original -> New Name"
+            self.ui_no_files_to_shuffle = "No files found to shuffle."
+            self.ui_shuffled_successfully = "Files shuffled successfully!"
+            self.ui_select_folder_first = "Please select a source folder first."
+            self.ui_no_files_to_rename = "No files found to rename."
+            self.ui_pattern_error = "Pattern must contain '{index}' or '{name}'."
+            self.ui_confirm_rename_title = "Confirm Rename"
+            self.ui_confirm_rename_message = "Are you sure?\\nThis operation permanently modifies your files."
+            self.ui_select_folder_title = "Select Folder"
+            self.ui_starting_rename = "Starting renaming..."
+            self.ui_renaming_status = "Renaming: {new_name} ({current}/{total})"
+            self.ui_op_completed = "Operation completed successfully."
+            self.ui_op_failed = "Operation failed or was cancelled."
+            self.ui_dest_folder_not_found = "Destination folder not found."
+            self.ui_cancelling_op = "Cancelling operation..."
+        
+        self.on_folder_or_subfolder_changed()
 
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    app.setStyle('Fusion')
-    window = ShuffleTune()
-    window.show()
-    sys.exit(app.exec())
+    def show_message(self, title, message, msg_type):
+        content = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(10))
+        content.add_widget(Label(text=message, text_size=(Window.width * 0.7, None), halign='center', valign='middle'))
+        close_button = Button(text="OK", size_hint_y=None, height=dp(44))
+        content.add_widget(close_button)
+
+        popup = Popup(title=title, content=content, size_hint=(0.8, 0.4), auto_dismiss=False)
+        close_button.bind(on_release=popup.dismiss)
+        popup.open()
+
+    def show_help_popup(self, *args):
+        help_text_pt = (
+            "1. [b]Pasta de Origem:[/b] Selecione a pasta com seus arquivos.\\n"
+            "2. [b]Pasta de Destino:[/b] (Opcional) Escolha uma pasta para salvar os arquivos renomeados. Se em branco, os arquivos são modificados na origem.\\n"
+            "3. [b]Incluir Subpastas:[/b] Processa arquivos em todas as subpastas.\\n"
+            "4. [b]Abrir Pasta de Destino:[/b] Abre a pasta de destino no final.\\n"
+            "5. [b]Limpar Nomes:[/b] Remove caracteres inválidos como / ? * < > dos nomes.\\n"
+            "6. [b]Extensões:[/b] Defina os tipos de arquivo a processar (ex: mp3, wav).\\n"
+            "7. [b]Formato:[/b] Use {index} para número e {name} para o nome original.\\n"
+            "8. [b]Embaralhar:[/b] Aleatoriza a ordem dos arquivos antes de renomear.\\n"
+            "9. [b]Renomear:[/b] Inicia a operação."
+        )
+        help_text_en = (
+            "1. [b]Source Folder:[/b] Select the folder with your files.\\n"
+            "2. [b]Output Folder:[/b] (Optional) Choose a folder to save the renamed files. If blank, files are modified in place.\\n"
+            "3. [b]Include Subfolders:[/b] Process files in all subfolders.\\n"
+            "4. [b]Open Output Folder:[/b] Opens the destination folder when complete.\\n"
+            "5. [b]Sanitize Names:[/b] Removes invalid characters like / ? * < > from names.\\n"
+            "6. [b]Extensions:[/b] Define file types to process (e.g., mp3, wav).\\n"
+            "7. [b]Pattern:[/b] Use {index} for a number and {name} for the original name.\\n"
+            "8. [b]Shuffle:[/b] Randomizes the file order before renaming.\\n"
+            "9. [b]Rename:[/b] Starts the operation."
+        )
+        
+        content = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(10))
+        scroll_view = ScrollView()
+        help_label = Label(
+            text=help_text_pt if self.language == 'pt' else help_text_en,
+            text_size=(Window.width * 0.75, None),
+            halign='left', valign='top',
+            markup=True
+        )
+        help_label.bind(texture_size=help_label.setter('size'))
+        scroll_view.add_widget(help_label)
+        content.add_widget(scroll_view)
+        
+        close_button = Button(text="OK", size_hint_y=None, height=dp(44))
+        content.add_widget(close_button)
+
+        popup = Popup(
+            title=self.ui_help_button,
+            content=content, size_hint=(0.9, 0.9))
+        close_button.bind(on_release=popup.dismiss)
+        popup.open()
+
+    def show_about_popup(self, *args):
+        about_text = (
+            f"[b]ShuffleTune - Renomeador de Arquivos[/b]\\n"
+            f"Versão: 2.1\\n"
+            f"Criado por: Inteligência Artificial\\n\\n"
+            f"Um utilitário simples e poderoso para organizar suas coleções de arquivos."
+        ) if self.language == 'pt' else (
+            f"[b]ShuffleTune - File Renamer[/b]\\n"
+            f"Version: 2.1\\n"
+            f"Created by: Artificial Intelligence\\n\\n"
+            f"A simple and powerful utility to organize your file collections."
+        )
+
+        content = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(10))
+        content.add_widget(Label(text=about_text, markup=True, halign='center', valign='middle'))
+        close_button = Button(text="OK", size_hint_y=None, height=dp(44))
+        content.add_widget(close_button)
+        
+        popup = Popup(title=self.ui_about_button, content=content, size_hint=(0.8, 0.5))
+        close_button.bind(on_release=popup.dismiss)
+        popup.open()
+
+
+if __name__ == '__main__':
+    ShuffleTuneApp().run()
